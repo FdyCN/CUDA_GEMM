@@ -6,4 +6,4 @@
 *.fatbin
 
 # cmake related
-./cmake-build-*
+cmake-build-*
