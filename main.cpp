@@ -8,12 +8,8 @@
 #include <iostream>
 
 void generate_random_float(float *input, const int length) {
-    std::random_device rd;  //Will be used to obtain a seed for the random number engine
-    std::mt19937 gen(rd()); //Standard mersenne_twister_engine seeded with rd()
-    std::uniform_real_distribution<> dis(1.0, 2.0);
     for (int i = 0; i < length; i++) {
-        input[i] = dis(gen);
-//        input[i] = static_cast<float>(rand() % 2 + 1);
+        input[i] = static_cast<float>(rand() % 5 + 1);
     }
 }
 
