@@ -9,18 +9,28 @@
 #include <iostream>
 #include <unordered_map>
 
-#define CHECK_TEST(expr) \
+#define CHECK_TEST(expr, op) \
 {                        \
 do{                      \
     auto res = (expr);   \
     if((res)){             \
-        std::cout << "func:  [" << #expr << "]   compare FAILED! " << std::endl; \
+        std::cout << "func:  [" << op << "]   compare FAILED! " << std::endl; \
         return -1;       \
     }                    \
     else{                \
-        std::cout << "func:  [" << #expr << "]   compare PASSED! " << std::endl; \
+        std::cout << "func:  [" << op << "]   compare PASSED! " << std::endl; \
         return 0;\
     }\
+    }while(0);                  \
+}
+
+#define CHECK_RETURN(x, log) \
+{                        \
+do{                      \
+    if((x)){             \
+        std::cout << "func:  [" << log << "]  error! " << std::endl; \
+        return -1;       \
+    }                    \
     }while(0);                  \
 }
 

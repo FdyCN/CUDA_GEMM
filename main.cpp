@@ -15,9 +15,6 @@
     return -1; \
   }
 
-enum class TestOP {
-    FLOAT_NAIVE_GEMM_N_T = 0,
-};
 
 int get_gpu_properties() {
     int device_count;
@@ -64,7 +61,7 @@ int get_gpu_properties() {
     return 0;
 }
 
-int test_gemm_kernels(const int M, const int N, const int K, TestOP op) {
+int test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op) {
     float *a = (float *) malloc(M * K * sizeof(float));
     generate_random_float(a, M * K);
     float *b = (float *) malloc(N * K * sizeof(float));
@@ -84,11 +81,11 @@ int test_gemm_kernels(const int M, const int N, const int K, TestOP op) {
     cudaMalloc((void **) &dev_c, M * N * sizeof(float));
 
     switch (op) {
-        case TestOP::FLOAT_NAIVE_GEMM_N_T: {
-            naive_gemm<float>(dev_a, dev_b, dev_c, M, N, K, false, true);
+        case GEMM_OP::FLOAT_NAIVE_GEMM_N_T: {
+            CHECK_RETURN(gemm_interface<float>(dev_a, dev_b, dev_c, M, N, K, op), "FLOAT_NAIVE_GEMM_N_T");
             cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
             standard_gemm_host<float>(a, b, d, M, N, K, false, true);
-            CHECK_TEST(compare_results<float>(d, c, M * N));
+            CHECK_TEST(compare_results<float>(d, c, M * N), "FLOAT_NAIVE_GEMM_N_T");
             break;
         }
         default: {
@@ -111,6 +108,6 @@ int main() {
     int N = 16;
     int K = 16;
     get_gpu_properties();
-    test_gemm_kernels(M, N, K, TestOP::FLOAT_NAIVE_GEMM_N_T);
+    test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_NAIVE_GEMM_N_T);
     return 0;
 }
