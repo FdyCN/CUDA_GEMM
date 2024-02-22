@@ -1,3 +1,7 @@
+//
+// Created by FdyCN on 2024/2/22.
+//
+
 #ifndef CUDA_GEMM_COMMON_HPP
 #define CUDA_GEMM_COMMON_HPP
 
@@ -6,21 +10,6 @@
 
 #define UP_DIV(x, y) (((x) + ((y) - 1)) / (y))
 #define UP_ROUND(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
-
-#define CHECK_TEST(expr) \
-{                        \
-do{                      \
-    auto res = (expr);   \
-    if((res)){             \
-        std::cout << "func:  [" << #expr << "]   compare FAILED! " << std::endl; \
-        return -1;       \
-    }                    \
-    else{                \
-        std::cout << "func:  [" << #expr << "]   compare PASSED! " << std::endl; \
-        return 0;\
-    }\
-    }while(0);                  \
-}
 
 template<typename T>
 void standard_gemm_host(const T *a, const T *b, T *out, const int M, const int N, const int K, bool transA = false,

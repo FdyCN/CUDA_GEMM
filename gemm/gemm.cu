@@ -1,3 +1,7 @@
+//
+// Created by FdyCN on 2024/2/22.
+//
+
 #include "stdlib.h"
 #include "cuda.h"
 #include "device_launch_parameters.h"
