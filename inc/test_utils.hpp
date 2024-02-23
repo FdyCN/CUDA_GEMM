@@ -17,10 +17,6 @@ do{                      \
         std::cout << "func:  [" << op << "]   compare FAILED! " << std::endl; \
         return -1;       \
     }                    \
-    else{                \
-        std::cout << "func:  [" << op << "]   compare PASSED! " << std::endl; \
-        return 0;\
-    }\
     }while(0);                  \
 }
 

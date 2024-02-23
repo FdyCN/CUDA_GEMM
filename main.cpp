@@ -7,6 +7,7 @@
 #include "gemm.hpp"
 #include "common.hpp"
 #include "test_utils.hpp"
+#include "cublas_v2.h"
 
 #define CHECK_CUDA(expr) \
   if((expr) != cudaSuccess) \
@@ -80,12 +81,20 @@ int test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op) {
     float *dev_c;
     cudaMalloc((void **) &dev_c, M * N * sizeof(float));
 
+    int iter = 10;
     switch (op) {
         case GEMM_OP::FLOAT_NAIVE_GEMM_N_T: {
-            CHECK_RETURN(gemm_interface<float>(dev_a, dev_b, dev_c, M, N, K, op), "FLOAT_NAIVE_GEMM_N_T");
+            CHECK_RETURN(gemm_interface<float>(dev_a, dev_b, dev_c, M, N, K, iter, op), "FLOAT_NAIVE_GEMM_N_T");
             cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
             standard_gemm_host<float>(a, b, d, M, N, K, false, true);
             CHECK_TEST(compare_results<float>(d, c, M * N), "FLOAT_NAIVE_GEMM_N_T");
+            break;
+        }
+        case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T:{
+            CHECK_RETURN(cublas_gemm_interface<float>(dev_a, dev_b, dev_c, M, N, K, iter, op), "FLOAT_CUBLAS_GEMM_N_T");
+            cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+            standard_gemm_host<float>(a, b, d, M, N, K, false, true);
+            CHECK_TEST(compare_results<float>(d, c, M * N), "FLOAT_CUBLAS_GEMM_N_T");
             break;
         }
         default: {
@@ -104,10 +113,11 @@ int test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op) {
 }
 
 int main() {
-    int M = 16;
-    int N = 16;
-    int K = 16;
+    int M = 1024;
+    int N = 1024;
+    int K = 1024;
     get_gpu_properties();
     test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_NAIVE_GEMM_N_T);
+    test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_N_T);
     return 0;
 }
