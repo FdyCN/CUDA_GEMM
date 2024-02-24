@@ -10,30 +10,28 @@
 #include "cublas_v2.h"
 
 #define CHECK_CUBLAS(expr) \
-  if((expr) != CUBLAS_STATUS_SUCCESS) \
+{ auto res = (expr);                         \
+  if((res) != CUBLAS_STATUS_SUCCESS) \
   { \
-    std::cout << "cublas function: [ " << #expr << " ] error!" << std::endl; \
+    std::cout << "cublas function: [ " << #expr << " ] error! return: " << static_cast<int>(res) << std::endl; \
     return -1; \
-  }
-
-#define CHECK_CUDA(expr) \
-  if((expr) != cudaSuccess) \
-  { \
-    std::cout << "cuda function: [ " << #expr << " ] error!" << std::endl; \
-    return -1; \
-  }
-
-template<typename T>
-__global__ void naive_add_kernel(const T *in0, const T *in1, T *out) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    out[idx] = in0[idx] + in1[idx];
+  } \
 }
 
-template void __global__ naive_add_kernel<float>(const float *, const float *, float *);
+#define CHECK_CUDA(expr) \
+{ auto res = (expr);                  \
+  if((res) != cudaSuccess) \
+  { \
+    std::cout << "cuda function: [ " << #expr << " ] error! return: " << static_cast<int>(res) << std::endl; \
+    return -1; \
+  } \
+}
 
 // N_T means transpose_A = false, transpose_B = true
-template<typename T>
-__global__ void naive_gemm_kernel_N_T(const T *a, const T *b, T *out, const int M, const int N, const int K) {
+__global__ void
+naive_sgemm_kernel_N_T(float *__restrict__ a, float *__restrict__ b, float *__restrict__ out, const int M,
+                       const int N,
+                       const int K) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x; // N-axis
     int idy = blockIdx.y * blockDim.y + threadIdx.y; // M-axis
 
@@ -48,27 +46,272 @@ __global__ void naive_gemm_kernel_N_T(const T *a, const T *b, T *out, const int 
     }
 }
 
-template void __global__
-naive_gemm_kernel_N_T<float>(const float *, const float *, float *, const int, const int, const int);
+// cal offset from row col and ld , in row-major matrix, ld is the width of the matrix
+#define OFFSET(row, col, ld) ((row) * (ld) + (col))
 
-template<typename T>
-void naive_add(const T *in0, const T *in1, T *out) {
-    auto kernel = &naive_add_kernel<float>;
-    kernel<<<1, 1>>>(in0, in1, out);
+// transfer float4
+#define FETCH_FLOAT4(pointer) (reinterpret_cast<float4*>(&(pointer))[0])
+
+// reference: https://github.com/Liu-xiandong/How_to_optimize_in_GPU/blob/master/sgemm/sgemm_v1.cu
+template<
+        const int BLOCK_SIZE_M,
+        const int BLOCK_SIZE_N,
+        const int BLOCK_SIZE_K,
+        const int THREAD_SIZE_Y,  // height of a Tile that each thread calculate
+        const int THREAD_SIZE_X   // width of a Tile that each thread calculate
+>
+__global__ void
+blocked_sram_sgemm_kernel_N_N(float *a, float *b, float *out, const int M,
+                              const int N,
+                              const int K) {
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    // the threads number in Block of X,Y
+    const int THREAD_X_PER_BLOCK = BLOCK_SIZE_N / THREAD_SIZE_X;
+    const int THREAD_Y_PER_BLOCK = BLOCK_SIZE_M / THREAD_SIZE_Y;
+    const int THREAD_NUM_PER_BLOCK = THREAD_X_PER_BLOCK * THREAD_Y_PER_BLOCK;
+
+    const int tid = ty * THREAD_X_PER_BLOCK + tx;
+
+    // shared memory, use double buffer for global-->sram async copy.
+    __shared__ float sram_a[2][BLOCK_SIZE_K][BLOCK_SIZE_M]; // store matrix A, transposed for outer-product
+    __shared__ float sram_b[2][BLOCK_SIZE_K][BLOCK_SIZE_N]; // store matrix B, no need to transpose
+
+    // registry for C
+    float accum[THREAD_SIZE_Y][THREAD_SIZE_X] = {0};
+    // async copy of sram_a->frag_a for A in outer-product, so need double buffer
+    float frag_a[2][THREAD_SIZE_Y] = {0};
+    // async copy of sram_b->frag_b for B in outer-product, so need double buffer
+    float frag_b[2][THREAD_SIZE_X] = {0};
+
+    // load from global to register by float4, so THREAD_NUM_PER_BLOCK * 4
+    const int ldg_num_a = BLOCK_SIZE_M * BLOCK_SIZE_K / (THREAD_NUM_PER_BLOCK * 4);
+    const int ldg_num_b = BLOCK_SIZE_N * BLOCK_SIZE_K / (THREAD_NUM_PER_BLOCK * 4);
+
+    // used for temp store when global-->sram, async copy of global-->sram.
+    float ldg_a_reg[4 * ldg_num_a];
+    float ldg_b_reg[4 * ldg_num_b];
+
+    // threads number needed in load one row of A\B
+    const int A_TILE_THREAD_PER_ROW = BLOCK_SIZE_K / 4;
+    const int B_TILE_THREAD_PER_ROW = BLOCK_SIZE_N / 4;
+
+    // row index that will NOT be changed in one thread THREAD_NUM_PER_BLOCK < BLOCK_K or BLOCK_N
+    const int A_TILE_ROW_START = tid / A_TILE_THREAD_PER_ROW;
+    const int B_TILE_ROW_START = tid / B_TILE_THREAD_PER_ROW;
+
+    // col index that will be NOT changed in one thread if THREAD_NUM_PER_BLOCK > BLOCK_K or BLOCK_N
+    const int A_TILE_COL = tid % A_TILE_THREAD_PER_ROW * 4;
+    const int B_TILE_COL = tid % B_TILE_THREAD_PER_ROW * 4;
+
+    // row stride that thread uses to load multiple rows of a tile
+    const int A_TILE_ROW_STRIDE = THREAD_NUM_PER_BLOCK / A_TILE_THREAD_PER_ROW;
+    const int B_TILE_ROW_STRIDE = THREAD_NUM_PER_BLOCK / B_TILE_THREAD_PER_ROW;
+
+    // blocked index.
+    float *a_start = &a[(BLOCK_SIZE_M * by) * K];
+    float *b_start = &b[BLOCK_SIZE_N * bx];
+
+    // transfer first tile from global mem to shared mem
+    // load A from global memory to shared memory, use ldg_a_reg for transpose A from [a_tile_row,a_tile_col] to [a_tile_col,a_tile_row]
+#pragma unroll
+    for (int i = 0; i < BLOCK_SIZE_M; i += A_TILE_ROW_STRIDE) {
+        int ldg_index = i / A_TILE_ROW_STRIDE * 4;
+        FETCH_FLOAT4(ldg_a_reg[ldg_index]) = FETCH_FLOAT4(a_start[OFFSET(
+                A_TILE_ROW_START + i, // row
+                A_TILE_COL, // col
+                K)]);
+        sram_a[0][A_TILE_COL][A_TILE_ROW_START + i] = ldg_a_reg[ldg_index];
+        sram_a[0][A_TILE_COL + 1][A_TILE_ROW_START + i] = ldg_a_reg[ldg_index + 1];
+        sram_a[0][A_TILE_COL + 2][A_TILE_ROW_START + i] = ldg_a_reg[ldg_index + 2];
+        sram_a[0][A_TILE_COL + 3][A_TILE_ROW_START + i] = ldg_a_reg[ldg_index + 3];
+    }
+
+    // load B from global memory to shared memory directly.
+#pragma unroll
+    for (int i = 0; i < BLOCK_SIZE_K; i += B_TILE_ROW_STRIDE) {
+        FETCH_FLOAT4(sram_b[0][B_TILE_ROW_START + i][B_TILE_COL]) = FETCH_FLOAT4(b_start[OFFSET(
+                B_TILE_ROW_START + i, // row
+                B_TILE_COL, // col
+                N)]);
+    }
+    __syncthreads();
+
+    // load first in col of A from sram to register
+    for (int idy = 0; idy < THREAD_SIZE_Y; idy += 4) {
+        FETCH_FLOAT4(frag_a[0][idy]) = FETCH_FLOAT4(sram_a[0][0][THREAD_SIZE_Y * ty + idy]);
+    }
+    // load first in row of B from sram to register
+    for (int idx = 0; idx < THREAD_SIZE_X; idx += 4) {
+        FETCH_FLOAT4(frag_b[0][idx]) = FETCH_FLOAT4(sram_b[0][0][THREAD_SIZE_X * tx + idx]);
+    }
+
+    // state machine flag, stands for the 0\1 index in double buffer, switching for write and read.
+    int write_stage_idx = 1;
+    int tile_index = 0;
+
+    do {
+        // load the NEXT tile, first tile has already loaded before, .
+        tile_index += BLOCK_SIZE_K;
+
+        // if there is rest tile, load from global to register,
+        if (tile_index < K) {
+#pragma unroll
+            for (int i = 0; i < BLOCK_SIZE_M; i += A_TILE_ROW_STRIDE) {
+                int ldg_index = i / A_TILE_ROW_STRIDE * 4;
+                FETCH_FLOAT4(ldg_a_reg[ldg_index]) = FETCH_FLOAT4(a_start[OFFSET(
+                        A_TILE_ROW_START + i, // row
+                        A_TILE_COL + tile_index, // col
+                        K)]);
+            }
+#pragma unroll
+            for (int i = 0; i < BLOCK_SIZE_K; i += B_TILE_ROW_STRIDE) {
+                int ldg_index = i / B_TILE_ROW_STRIDE * 4;
+                FETCH_FLOAT4(ldg_b_reg[ldg_index]) = FETCH_FLOAT4(b_start[OFFSET(
+                        tile_index + B_TILE_ROW_START + i, // row
+                        B_TILE_COL, // col
+                        N)]);
+            }
+        }
+
+        // read and write use mutually exclusive buffer
+        int read_stage_idx = write_stage_idx ^ 1;
+        int j = 0;
+#pragma unroll
+        for (; j < BLOCK_SIZE_K - 1; j++) {
+            // load NEXT frag of A from sram to register, the frag is load before
+#pragma unroll
+            for (int idy = 0; idy < THREAD_SIZE_Y; idy += 4) {
+                // bit shift instead (j + 1) % 2
+                FETCH_FLOAT4(frag_a[(j + 1) % 2][idy]) = FETCH_FLOAT4(
+                        sram_a[read_stage_idx][j + 1][THREAD_SIZE_Y * ty + idy]);
+            }
+            // load the NEXT frag of B from sram to register, the frag is load before
+#pragma unroll
+            for (int idx = 0; idx < THREAD_SIZE_X; idx += 4) {
+                // bit shift instead (j + 1) % 2
+                FETCH_FLOAT4(frag_b[(j + 1) % 2][idx]) = FETCH_FLOAT4(
+                        sram_b[read_stage_idx][j + 1][THREAD_SIZE_X * tx + idx]);
+            }
+
+            // calc the CURRENT using outer-product, intermediate result stored in accum
+#pragma unroll
+            for (int idy = 0; idy < THREAD_SIZE_Y; idy++) {
+#pragma unroll
+                for (int idx = 0; idx < THREAD_SIZE_X; idx++) {
+                    accum[idy][idx] += frag_a[j % 2][idy] * frag_b[j % 2][idx];
+                }
+            }
+        }
+
+        // load the NEXT tile from register ldg_a\b_reg into sram_a\b
+        if (tile_index < K) {
+#pragma unroll
+            // transpose A
+            for (int i = 0; i < BLOCK_SIZE_M; i += A_TILE_ROW_STRIDE) {
+                int ldg_index = i / A_TILE_ROW_STRIDE * 4;
+                sram_a[write_stage_idx][A_TILE_COL][A_TILE_ROW_START + i] = ldg_a_reg[ldg_index];
+                sram_a[write_stage_idx][A_TILE_COL + 1][A_TILE_ROW_START + i] = ldg_a_reg[ldg_index + 1];
+                sram_a[write_stage_idx][A_TILE_COL + 2][A_TILE_ROW_START + i] = ldg_a_reg[ldg_index + 2];
+                sram_a[write_stage_idx][A_TILE_COL + 3][A_TILE_ROW_START + i] = ldg_a_reg[ldg_index + 3];
+            }
+            for (int i = 0; i < BLOCK_SIZE_K; i += B_TILE_ROW_STRIDE) {
+                int ldg_index = i / B_TILE_ROW_STRIDE * 4;
+                FETCH_FLOAT4(sram_b[write_stage_idx][B_TILE_ROW_START + i][B_TILE_COL]) = FETCH_FLOAT4(
+                        ldg_b_reg[ldg_index]);
+            }
+
+            // use double buffer, only need one sync
+            __syncthreads();
+            // switch stage
+            write_stage_idx ^= 1;
+        }
+
+        // now, let's deal with the last tile.
+#pragma unroll
+        for (int idy = 0; idy < THREAD_SIZE_Y; idy += 4) {
+            int buffer_id = ((j + 1) << 31) >> 31;
+            FETCH_FLOAT4(frag_a[0][idy]) = FETCH_FLOAT4(
+                    sram_a[read_stage_idx ^ 1][0][THREAD_SIZE_Y * ty + idy]);
+        }
+#pragma unroll
+        for (int idx = 0; idx < THREAD_SIZE_Y; idx += 4) {
+            int buffer_id = ((j + 1) << 31) >> 31;
+            FETCH_FLOAT4(frag_b[0][idx]) = FETCH_FLOAT4(
+                    sram_b[read_stage_idx ^ 1][0][THREAD_SIZE_X * tx + idx]);
+        }
+#pragma unroll
+        for (int idy = 0; idy < THREAD_SIZE_Y; idy++) {
+#pragma unroll
+            for (int idx = 0; idx < THREAD_SIZE_X; idx++) {
+                int buffer_index = (j << 31) >> 31;
+                accum[idy][idx] += frag_a[1][idy] * frag_b[1][idx];
+            }
+        }
+    } while (tile_index < K);
+
+
+    // store back to C
+#pragma unroll
+    for (int idy = 0; idy < THREAD_SIZE_Y; ++idy) {
+#pragma unroll
+        for (int idx = 0; idx < THREAD_SIZE_X; idx += 4) {
+            FETCH_FLOAT4(out[OFFSET(
+                    BLOCK_SIZE_M * by + ty * THREAD_SIZE_Y + idy,
+                    BLOCK_SIZE_N * bx + tx * THREAD_SIZE_X + idx,
+                    N)]) = FETCH_FLOAT4(accum[idy][idx]);
+        }
+    }
 }
 
-template void naive_add<float>(const float *, const float *, float *);
+static size_t
+get_dynamic_sram_size(const void *kernel, const int block_M, const int block_N, const int block_K, const int elem_byte,
+                      bool double_buffer = false) {
+    int dev_id = 0;
+    CHECK_CUDA(cudaGetDevice(&dev_id));
+
+    cudaDeviceProp dev_prop;
+    CHECK_CUDA(cudaGetDeviceProperties(&dev_prop, dev_id));
+
+    size_t sram_size = (block_M + block_N) * block_K * elem_byte;
+    sram_size = double_buffer ? sram_size * 2 : sram_size;
+
+    if (sram_size > dev_prop.sharedMemPerMultiprocessor) {
+        printf("sram size needed is over limitation!");
+        return -1;
+    }
+    CHECK_CUDA(
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sram_size));
+
+    return sram_size;
+}
 
 template<typename T>
-int gemm_interface(const T *a, const T *b, T *out, const int M, const int N, const int K, const int iter, GEMM_OP op) {
+int gemm_interface(T *a, T *b, T *out, const int M, const int N, const int K, const int iter, GEMM_OP op) {
 
     // warming up
     switch (op) {
         case GEMM_OP::FLOAT_NAIVE_GEMM_N_T: {
-            auto kernel = &naive_gemm_kernel_N_T<float>;
             dim3 block(16, 16);
             dim3 grid(UP_DIV(N, block.x), UP_DIV(M, block.y));
-            kernel<<<grid, block>>>(a, b, out, M, N, K);
+            naive_sgemm_kernel_N_T<<<grid, block>>>(a, b, out, M, N, K);
+            break;
+        }
+        case GEMM_OP::FLOAT_SRAM_GEMM_N_N: {
+            const int BLOCK_SIZE_M = 128;
+            const int BLOCK_SIZE_K = 8;
+            const int BLOCK_SIZE_N = 128;
+            const int THREAD_SIZE_X = 8;
+            const int THREAD_SIZE_Y = 8;
+            dim3 block(16, 16);
+            dim3 dimBlock(BLOCK_SIZE_N / THREAD_SIZE_X, BLOCK_SIZE_M / THREAD_SIZE_Y);
+            dim3 dimGrid(N / BLOCK_SIZE_N, M / BLOCK_SIZE_M);
+            blocked_sram_sgemm_kernel_N_N<BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, THREAD_SIZE_Y, THREAD_SIZE_X>
+            <<< dimGrid, dimBlock >>>(a, b, out, M, N, K);
             break;
         }
         default: {
@@ -77,16 +320,27 @@ int gemm_interface(const T *a, const T *b, T *out, const int M, const int N, con
         }
     }
     cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start);
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+    CHECK_CUDA(cudaEventRecord(start));
     for (int i = 0; i < iter; i++) {
         switch (op) {
             case GEMM_OP::FLOAT_NAIVE_GEMM_N_T: {
-                auto kernel = &naive_gemm_kernel_N_T<float>;
                 dim3 block(16, 16);
                 dim3 grid(UP_DIV(N, block.x), UP_DIV(M, block.y));
-                kernel<<<grid, block>>>(a, b, out, M, N, K);
+                naive_sgemm_kernel_N_T<<<grid, block>>>(a, b, out, M, N, K);
+                break;
+            }
+            case GEMM_OP::FLOAT_SRAM_GEMM_N_N: {
+                const int BLOCK_SIZE_M = 128;
+                const int BLOCK_SIZE_K = 8;
+                const int BLOCK_SIZE_N = 128;
+                const int THREAD_SIZE_X = 8;
+                const int THREAD_SIZE_Y = 8;
+                dim3 dimBlock(BLOCK_SIZE_N / THREAD_SIZE_X, BLOCK_SIZE_M / THREAD_SIZE_Y);
+                dim3 dimGrid(N / BLOCK_SIZE_N, M / BLOCK_SIZE_M);
+                blocked_sram_sgemm_kernel_N_N<BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, THREAD_SIZE_Y, THREAD_SIZE_X>
+                <<< dimGrid, dimBlock >>>(a, b, out, M, N, K);
                 break;
             }
             default: {
@@ -95,10 +349,10 @@ int gemm_interface(const T *a, const T *b, T *out, const int M, const int N, con
             }
         }
     }
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
+    CHECK_CUDA(cudaEventRecord(stop));
+    CHECK_CUDA(cudaEventSynchronize(stop));
     float time;
-    cudaEventElapsedTime(&time, start, stop);
+    CHECK_CUDA(cudaEventElapsedTime(&time, start, stop));
     float msecPerMatrixMul = time / iter;
     double flopsPerMatrixMul = 2.0 * (double) M * (double) N * (double) K;
     double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul / 1000.0f);
@@ -108,27 +362,24 @@ int gemm_interface(const T *a, const T *b, T *out, const int M, const int N, con
             gigaFlops,
             msecPerMatrixMul,
             flopsPerMatrixMul);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    CHECK_CUDA(cudaEventDestroy(start));
+    CHECK_CUDA(cudaEventDestroy(stop));
     return 0;
 }
 
 template int
-gemm_interface<float>(const float *, const float *, float *, const int, const int, const int, const int, GEMM_OP);
+gemm_interface<float>(float *, float *, float *, const int, const int, const int, const int, GEMM_OP);
 
 // modified from: https://github.com/zchee/cuda-sample/blob/master/0_Simple/matrixMulCUBLAS/matrixMulCUBLAS.cpp
 template<typename T>
-int cublas_gemm_interface(const T *a, const T *b, T *out, const int M, const int N, const int K, const int iter,
+int cublas_gemm_interface(void *v_handle, T *a, T *b, T *out, const int M, const int N, const int K, const int iter,
                           GEMM_OP op) {
     // CUBLAS version 2.0
     {
         const float alpha = 1.0f;
         const float beta = 0.0f;
-        cublasHandle_t handle;
+        cublasHandle_t handle = (cublasHandle_t) v_handle;
         cudaEvent_t start, stop;
-
-        CHECK_CUBLAS(cublasCreate(&handle));
-
         //Perform warmup operation with cublas
         switch (op) {
             case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
@@ -155,7 +406,8 @@ int cublas_gemm_interface(const T *a, const T *b, T *out, const int M, const int
             // so C^T = B^T @ A^T
             switch (op) {
                 case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
-                    CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+                    CHECK_CUBLAS(
+                            cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
                     break;
                 }
                 default: {
@@ -184,13 +436,10 @@ int cublas_gemm_interface(const T *a, const T *b, T *out, const int M, const int
                 gigaFlops,
                 msecPerMatrixMul,
                 flopsPerMatrixMul);
-
-        // Destroy the handle
-        CHECK_CUBLAS(cublasDestroy(handle));
     }
     return 0;
 }
 
 template int
-cublas_gemm_interface<float>(const float *, const float *, float *, const int, const int, const int, const int,
+cublas_gemm_interface<float>(void *, float *, float *, float *, const int, const int, const int, const int,
                              GEMM_OP);
