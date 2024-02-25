@@ -4,6 +4,9 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <iostream>
+#include <fstream>
+#include <string>
 #include "gemm.hpp"
 #include "common.hpp"
 #include "test_utils.hpp"
@@ -69,7 +72,8 @@ int get_gpu_properties() {
     return 0;
 }
 
-int test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op, bool perf_only = false) {
+int
+test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op, float *perf = nullptr, bool perf_only = false) {
     float *a = (float *) malloc(M * K * sizeof(float));
     generate_random_float(a, M * K);
     float *b = (float *) malloc(N * K * sizeof(float));
@@ -93,7 +97,7 @@ int test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op, bool pe
     CHECK_CUBLAS(cublasCreate(&handle));
     switch (op) {
         case GEMM_OP::FLOAT_NAIVE_GEMM_N_T: {
-            CHECK_RETURN(gemm_interface<float>(dev_a, dev_b, dev_c, M, N, K, iter, op), "FLOAT_NAIVE_GEMM_N_T");
+            CHECK_RETURN(gemm_interface<float>(dev_a, dev_b, dev_c, M, N, K, iter, op, perf), "FLOAT_NAIVE_GEMM_N_T");
             if (!perf_only) {
                 cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
                 standard_gemm_host<float>(a, b, d, M, N, K, false, true);
@@ -102,7 +106,7 @@ int test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op, bool pe
             break;
         }
         case GEMM_OP::FLOAT_SRAM_GEMM_N_N: {
-            CHECK_RETURN(gemm_interface<float>(dev_a, dev_b, dev_c, M, N, K, iter, op), "FLOAT_SRAM_GEMM_N_N");
+            CHECK_RETURN(gemm_interface<float>(dev_a, dev_b, dev_c, M, N, K, iter, op, perf), "FLOAT_SRAM_GEMM_N_N");
             if (!perf_only) {
                 cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
                 standard_gemm_host<float>(a, b, d, M, N, K, false, false);
@@ -111,7 +115,7 @@ int test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op, bool pe
             break;
         }
         case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
-            CHECK_RETURN(cublas_gemm_interface<float>((void *) handle, dev_a, dev_b, dev_c, M, N, K, iter, op),
+            CHECK_RETURN(cublas_gemm_interface<float>((void *) handle, dev_a, dev_b, dev_c, M, N, K, iter, op, perf),
                          "FLOAT_CUBLAS_GEMM_N_T");
             if (!perf_only) {
                 cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
@@ -139,18 +143,51 @@ int test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op, bool pe
 }
 
 int main(int argc, char **argv) {
-    if (argc != 5) {
-        printf("usage: ./main [M] [N] [N] [Performance only]\n");
+    if (argc != 5 && argc != 1) {
+        printf("usage: ./main [M] [N] [N] [Performance only] or ./main (means batch tests performace) \n");
         exit(0);
     }
-    size_t M = atoi(argv[1]);
-    size_t K = atoi(argv[2]);
-    size_t N = atoi(argv[3]);
-    bool performance_only = atoi(argv[4]) != 0 ? true : false;
     get_gpu_properties();
-    test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_SRAM_GEMM_N_N, performance_only);
-    test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_N_T, performance_only);
-//    test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_NAIVE_GEMM_N_T);
+    if (argc == 5) {
+        size_t M = atoi(argv[1]);
+        size_t K = atoi(argv[2]);
+        size_t N = atoi(argv[3]);
+        bool performance_only = atoi(argv[4]) != 0 ? true : false;
+        test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_SRAM_GEMM_N_N, nullptr, performance_only);
+        test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_N_T, nullptr, performance_only);
+    }
+
+    if (argc == 1) {
+        std::vector<int> MNK = {128, 256, 512, 1024, 2048, 4096, 8192};
+        std::string fname = "gemm_batch_test.csv";
+        std::ofstream out_file(fname, std::ios::out);
+        if(out_file.is_open()){
+            // titles
+            out_file << "name" << ','
+                     << "M" << ','
+                     << "N" << ','
+                     << "K" << ','
+                     << "Perf(GFLOPS)" << std::endl;
+            for (const auto &v: MNK) {
+                float perf = 0.0f; // returned in GFLOPS
+                test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_SRAM_GEMM_N_N, &perf, true);
+                out_file << "FLOAT_SRAM_GEMM_N_N" << ',' << v << ',' << v << ',' << v << ',' << perf << std::endl;
+                test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_CUBLAS_GEMM_N_T, &perf, true);
+                out_file << "FLOAT_CUBLAS_GEMM_N_T" << ',' << v << ',' << v << ',' << v << ',' << perf << std::endl;
+            }
+            out_file.close();
+        }
+        else{
+            std::cout << "Cannot save to file: " << fname << std::endl;
+            std::cout << "ONLY print in terminal...." << std::endl;
+            for (const auto &v: MNK) {
+                float perf = 0.0f; // returned in GFLOPS
+                test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_SRAM_GEMM_N_N, &perf, true);
+                test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_CUBLAS_GEMM_N_T, &perf, true);
+            }
+        }
+
+    }
 
     return 0;
 }

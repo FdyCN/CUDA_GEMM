@@ -291,7 +291,7 @@ get_dynamic_sram_size(const void *kernel, const int block_M, const int block_N, 
 }
 
 template<typename T>
-int gemm_interface(T *a, T *b, T *out, const int M, const int N, const int K, const int iter, GEMM_OP op) {
+int gemm_interface(T *a, T *b, T *out, const int M, const int N, const int K, const int iter, GEMM_OP op, float *perf) {
 
     // warming up
     switch (op) {
@@ -364,26 +364,51 @@ int gemm_interface(T *a, T *b, T *out, const int M, const int N, const int K, co
             flopsPerMatrixMul);
     CHECK_CUDA(cudaEventDestroy(start));
     CHECK_CUDA(cudaEventDestroy(stop));
+
+    if (perf) { *perf = static_cast<float>(gigaFlops); }
     return 0;
 }
 
 template int
-gemm_interface<float>(float *, float *, float *, const int, const int, const int, const int, GEMM_OP);
+gemm_interface<float>(float *, float *, float *, const int, const int, const int, const int, GEMM_OP, float *);
 
 // modified from: https://github.com/zchee/cuda-sample/blob/master/0_Simple/matrixMulCUBLAS/matrixMulCUBLAS.cpp
 template<typename T>
 int cublas_gemm_interface(void *v_handle, T *a, T *b, T *out, const int M, const int N, const int K, const int iter,
-                          GEMM_OP op) {
+                          GEMM_OP op, float *perf) {
     // CUBLAS version 2.0
-    {
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
-        cublasHandle_t handle = (cublasHandle_t) v_handle;
-        cudaEvent_t start, stop;
-        //Perform warmup operation with cublas
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    cublasHandle_t handle = (cublasHandle_t) v_handle;
+    cudaEvent_t start, stop;
+    //Perform warmup operation with cublas
+    switch (op) {
+        case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
+            CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+            break;
+        }
+        default: {
+            std::cout << "Unsupported GEMM type!" << std::endl;
+            return -1;
+        }
+    }
+
+
+    // Allocate CUDA events that we'll use for timing
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+
+    // Record the start event
+    CHECK_CUDA(cudaEventRecord(start));
+
+    for (int j = 0; j < iter; j++) {
+        // note cublas is column primary!
+        // need to transpose the order
+        // so C^T = B^T @ A^T
         switch (op) {
             case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
-                CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+                CHECK_CUBLAS(
+                        cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
                 break;
             }
             default: {
@@ -391,55 +416,33 @@ int cublas_gemm_interface(void *v_handle, T *a, T *b, T *out, const int M, const
                 return -1;
             }
         }
-
-
-        // Allocate CUDA events that we'll use for timing
-        CHECK_CUDA(cudaEventCreate(&start));
-        CHECK_CUDA(cudaEventCreate(&stop));
-
-        // Record the start event
-        CHECK_CUDA(cudaEventRecord(start));
-
-        for (int j = 0; j < iter; j++) {
-            // note cublas is column primary!
-            // need to transpose the order
-            // so C^T = B^T @ A^T
-            switch (op) {
-                case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
-                    CHECK_CUBLAS(
-                            cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
-                    break;
-                }
-                default: {
-                    std::cout << "Unsupported GEMM type!" << std::endl;
-                    return -1;
-                }
-            }
-        }
-
-        // Record the stop event
-        CHECK_CUDA(cudaEventRecord(stop));
-
-        // Wait for the stop event to complete
-        CHECK_CUDA(cudaEventSynchronize(stop));
-
-        float msecTotal = 0.0f;
-        CHECK_CUDA(cudaEventElapsedTime(&msecTotal, start, stop));
-
-        // Compute and print the performance
-        float msecPerMatrixMul = msecTotal / iter;
-        double flopsPerMatrixMul = 2.0 * (double) M * (double) N * (double) K;
-        double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul / 1000.0f);
-        printf(
-                "[cublasSgemm]: [M, N, K] = [%d, %d, %d] ==> Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops\n",
-                M, N, K,
-                gigaFlops,
-                msecPerMatrixMul,
-                flopsPerMatrixMul);
     }
+
+    // Record the stop event
+    CHECK_CUDA(cudaEventRecord(stop));
+
+    // Wait for the stop event to complete
+    CHECK_CUDA(cudaEventSynchronize(stop));
+
+    float msecTotal = 0.0f;
+    CHECK_CUDA(cudaEventElapsedTime(&msecTotal, start, stop));
+
+    // Compute and print the performance
+    float msecPerMatrixMul = msecTotal / iter;
+    double flopsPerMatrixMul = 2.0 * (double) M * (double) N * (double) K;
+    double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul / 1000.0f);
+    printf(
+            "[cublasSgemm]: [M, N, K] = [%d, %d, %d] ==> Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops\n",
+            M, N, K,
+            gigaFlops,
+            msecPerMatrixMul,
+            flopsPerMatrixMul);
+
+    if (perf) { *perf = static_cast<float>(gigaFlops); }
+
     return 0;
 }
 
 template int
 cublas_gemm_interface<float>(void *, float *, float *, float *, const int, const int, const int, const int,
-                             GEMM_OP);
+                             GEMM_OP, float *);

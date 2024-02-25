@@ -15,8 +15,8 @@ enum class GEMM_OP {
 };
 
 template<typename T>
-int gemm_interface(T* a, T* b, T* out, const int M, const int N, const int K, const int iter, GEMM_OP op);
+int gemm_interface(T* a, T* b, T* out, const int M, const int N, const int K, const int iter, GEMM_OP op, float* perf = nullptr);
 
 template<typename T>
-int cublas_gemm_interface(void* v_handle, T* a, T* b, T* out, const int M, const int N, const int K, const int iter, GEMM_OP op);
+int cublas_gemm_interface(void* v_handle, T* a, T* b, T* out, const int M, const int N, const int K, const int iter, GEMM_OP op, float* perf = nullptr);
 #endif //CUDA_GEMM_GEMM_HPP
