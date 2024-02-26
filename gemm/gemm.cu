@@ -2,14 +2,9 @@
 // Created by FdyCN on 2024/2/22.
 //
 
-#include "stdlib.h"
-#include "cuda.h"
 #include "mma.h"
-#include "device_launch_parameters.h"
 #include "gemm.hpp"
 #include "cublas_v2.h"
-#include "cublas_api.h"
-#include "cuda_fp16.hpp"
 #include "../half/half/half.hpp"
 
 #define UP_DIV(x, y) (((x) + ((y) - 1)) / (y))
