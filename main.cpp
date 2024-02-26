@@ -200,7 +200,7 @@ test_gemm_kernels_half(const int M, const int N, const int K, GEMM_OP op, float 
             CHECK_RETURN(gemm_half((void *) dev_a, (void *) dev_b, (void *) dev_c, M, N, K, iter, op, perf),
                          "HALF_NAIVE_TENSORCORE_N_T");
             if (!perf_only) {
-                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                cudaMemcpy(c, dev_c, M * N * sizeof(half_float::half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
                 standard_gemm_host_half(a, b, d, M, N, K, false, true);
                 CHECK_TEST(compare_results_half(d, c, M * N), "HALF_NAIVE_TENSORCORE_N_T");
             }
@@ -212,7 +212,7 @@ test_gemm_kernels_half(const int M, const int N, const int K, GEMM_OP op, float 
                                      perf),
                     "HALF_CUBLAS_GEMM_N_N");
             if (!perf_only) {
-                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                cudaMemcpy(c, dev_c, M * N * sizeof(half_float::half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
                 standard_gemm_host_half(a, b, d, M, N, K, false, false);
                 CHECK_TEST(compare_results_half(d, c, M * N), "HALF_CUBLAS_GEMM_N_N");
             }
@@ -224,7 +224,7 @@ test_gemm_kernels_half(const int M, const int N, const int K, GEMM_OP op, float 
                                      perf),
                     "HALF_CUBLAS_GEMM_N_T");
             if (!perf_only) {
-                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                cudaMemcpy(c, dev_c, M * N * sizeof(half_float::half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
                 standard_gemm_host_half(a, b, d, M, N, K, false, true);
                 CHECK_TEST(compare_results_half(d, c, M * N), "HALF_CUBLAS_GEMM_N_T");
             }
@@ -236,7 +236,7 @@ test_gemm_kernels_half(const int M, const int N, const int K, GEMM_OP op, float 
                                      perf),
                     "HALF_CUBLAS_GEMM_T_N");
             if (!perf_only) {
-                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                cudaMemcpy(c, dev_c, M * N * sizeof(half_float::half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
                 standard_gemm_host_half(a, b, d, M, N, K, true, false);
                 CHECK_TEST(compare_results_half(d, c, M * N), "HALF_CUBLAS_GEMM_T_N");
             }
@@ -248,7 +248,7 @@ test_gemm_kernels_half(const int M, const int N, const int K, GEMM_OP op, float 
                                      perf),
                     "HALF_CUBLAS_GEMM_T_T");
             if (!perf_only) {
-                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                cudaMemcpy(c, dev_c, M * N * sizeof(half_float::half), cudaMemcpyKind::cudaMemcpyDeviceToHost);
                 standard_gemm_host_half(a, b, d, M, N, K, true, true);
                 CHECK_TEST(compare_results_half(d, c, M * N), "HALF_CUBLAS_GEMM_T_T");
             }
@@ -273,21 +273,29 @@ test_gemm_kernels_half(const int M, const int N, const int K, GEMM_OP op, float 
 }
 
 int main(int argc, char **argv) {
+    get_gpu_properties();
+
     if (argc != 5 && argc != 1) {
         printf("usage: ./main [M] [N] [N] [Performance only] or ./main (means batch tests performace) \n");
         exit(0);
     }
-    get_gpu_properties();
     if (argc == 5) {
         size_t M = atoi(argv[1]);
         size_t K = atoi(argv[2]);
         size_t N = atoi(argv[3]);
         bool performance_only = atoi(argv[4]) != 0 ? true : false;
+        printf("=====HALF OP=====\n");
         test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_SRAM_GEMM_N_N, nullptr, performance_only);
         test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_N_N, nullptr, performance_only);
         test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_T_N, nullptr, performance_only);
         test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_N_T, nullptr, performance_only);
         test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_T_T, nullptr, performance_only);
+        printf("\n=====HALF OP=====\n");
+        test_gemm_kernels_half(M, N, K, GEMM_OP::HALF_NAIVE_TENSORCORE_N_T, nullptr, performance_only);
+        test_gemm_kernels_half(M, N, K, GEMM_OP::HALF_CUBLAS_GEMM_N_N, nullptr, performance_only);
+        test_gemm_kernels_half(M, N, K, GEMM_OP::HALF_CUBLAS_GEMM_N_T, nullptr, performance_only);
+        test_gemm_kernels_half(M, N, K, GEMM_OP::HALF_CUBLAS_GEMM_T_N, nullptr, performance_only);
+        test_gemm_kernels_half(M, N, K, GEMM_OP::HALF_CUBLAS_GEMM_T_T, nullptr, performance_only);
     }
 
     if (argc == 1) {

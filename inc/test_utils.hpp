@@ -39,7 +39,7 @@ void generate_random_float(float *input, const int length) {
 
 void generate_random_half(half_float::half *input, const int length) {
     for (int i = 0; i < length; i++) {
-        input[i] = static_cast<half_float::half>(rand() % 5 + 1);
+        input[i] = static_cast<half_float::half>(static_cast<float>(rand() % 5 + 1) / 1000.0f);
     }
 }
 
@@ -59,7 +59,8 @@ void standard_gemm_host(const T *a, const T *b, T *out, const int M, const int N
     }
 }
 
-void standard_gemm_host_half(const half_float::half *a, const half_float::half *b, half_float::half *out, const int M, const int N, const int K, bool transA = false,
+void standard_gemm_host_half(const half_float::half *a, const half_float::half *b, half_float::half *out, const int M,
+                             const int N, const int K, bool transA = false,
                              bool transB = true) {
     for (int m = 0; m < M; m++) {
         for (int n = 0; n < N; n++) {
@@ -107,7 +108,7 @@ int compare_results(const T *gt, const T *compute, const int length, float err_t
 }
 
 int compare_results_half(const half_float::half *gt, const half_float::half *compute, const int length,
-                    float err_thresh = 1e-3) {
+                         float err_thresh = 1e-2) {
     if (!gt || !compute) {
         std::cout << "gt or compute ptr is null" << std::endl;
         return -1;

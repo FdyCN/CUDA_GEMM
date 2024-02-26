@@ -4,6 +4,7 @@
 
 #include "stdlib.h"
 #include "cuda.h"
+#include "mma.h"
 #include "device_launch_parameters.h"
 #include "gemm.hpp"
 #include "cublas_v2.h"
@@ -42,6 +43,7 @@ static std::string get_test_name(GEMM_OP op) {
         ENUM_CHIP_TYPE_CASE(GEMM_OP::FLOAT_CUBLAS_GEMM_N_T);
         ENUM_CHIP_TYPE_CASE(GEMM_OP::FLOAT_CUBLAS_GEMM_T_N);
         ENUM_CHIP_TYPE_CASE(GEMM_OP::FLOAT_CUBLAS_GEMM_T_T);
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::HALF_NAIVE_TENSORCORE_N_T);
         ENUM_CHIP_TYPE_CASE(GEMM_OP::HALF_CUBLAS_GEMM_N_N);
         ENUM_CHIP_TYPE_CASE(GEMM_OP::HALF_CUBLAS_GEMM_N_T);
         ENUM_CHIP_TYPE_CASE(GEMM_OP::HALF_CUBLAS_GEMM_T_N);
@@ -50,6 +52,7 @@ static std::string get_test_name(GEMM_OP op) {
     return "Unknown test name!";
 }
 
+#pragma mark float_kernel
 // N_T means transpose_A = false, transpose_B = true
 __global__ void
 naive_sgemm_kernel_N_T(float *__restrict__ a, float *__restrict__ b, float *__restrict__ out, const int M,
@@ -291,28 +294,43 @@ blocked_sram_sgemm_kernel_N_N(float *a, float *b, float *out, const int M,
     }
 }
 
-static size_t
-get_dynamic_sram_size(const void *kernel, const int block_M, const int block_N, const int block_K, const int elem_byte,
-                      bool double_buffer = false) {
-    int dev_id = 0;
-    CHECK_CUDA(cudaGetDevice(&dev_id));
+#pragma mark half_kernel
+#define WARP_SIZE 32
+using namespace nvcuda;
 
-    cudaDeviceProp dev_prop;
-    CHECK_CUDA(cudaGetDeviceProperties(&dev_prop, dev_id));
+#define TILE_M 16
+#define TILE_N 16
+#define TILE_K 16
 
-    size_t sram_size = (block_M + block_N) * block_K * elem_byte;
-    sram_size = double_buffer ? sram_size * 2 : sram_size;
+__global__ void
+naive_tensorcore_kernel_N_T(half *__restrict__ a, half *__restrict__ b, half *__restrict__ out, const int M,
+                            const int N, const int K) {
+    int warp_id_n = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int warp_id_m = blockIdx.y;
 
-    if (sram_size > dev_prop.sharedMemPerMultiprocessor) {
-        printf("sram size needed is over limitation!");
-        return -1;
+    wmma::fragment<wmma::matrix_a, TILE_M, TILE_N, TILE_K, half, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, TILE_M, TILE_N, TILE_K, half, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, TILE_M, TILE_N, TILE_K, half> acc_frag;
+
+    wmma::fill_fragment(acc_frag, 0.0f);
+
+    int m_start = warp_id_m * TILE_M;
+    int n_start = warp_id_n * TILE_N;
+
+    for (int k = 0; k < K; k += TILE_K) {
+        if (m_start < M && n_start < N) {
+            wmma::load_matrix_sync(a_frag, a + m_start * K + k, K);
+            wmma::load_matrix_sync(b_frag, b + n_start * K + k, K);
+
+            wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+        }
     }
-    CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sram_size));
 
-    return sram_size;
+    // store out
+    if (m_start < M && n_start < N) {
+        wmma::store_matrix_sync(out + m_start * N + n_start, acc_frag, N, wmma::mem_row_major);
+    }
 }
-
 
 int gemm_float(float *a, float *b, float *out, const int M, const int N, const int K, const int iter, GEMM_OP op,
                float *perf) {
@@ -394,11 +412,59 @@ int gemm_float(float *a, float *b, float *out, const int M, const int N, const i
 }
 
 int gemm_half(void *a, void *b, void *out, const int M, const int N, const int K, const int iter, GEMM_OP op,
-               float *perf){
+              float *perf) {
+    // warming up
+    switch (op) {
+        case GEMM_OP::HALF_NAIVE_TENSORCORE_N_T: {
+            dim3 block(64, 4);
+            dim3 grid(UP_DIV(N, TILE_N * 2), UP_DIV(M, TILE_M * block.y));
+            naive_tensorcore_kernel_N_T<<<grid, block>>>((half*)a, (half*)b, (half*)out, M, N, K);
+            break;
+        }
+        default: {
+            std::cout << "Unsupported GEMM type!" << std::endl;
+            return -1;
+        }
+    }
+    cudaEvent_t start, stop;
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+    CHECK_CUDA(cudaEventRecord(start));
+    for (int i = 0; i < iter; i++) {
+        switch (op) {
+            case GEMM_OP::HALF_NAIVE_TENSORCORE_N_T: {
+                dim3 block(64, 4);
+                dim3 grid(UP_DIV(N, TILE_N * 2), UP_DIV(M, TILE_M * block.y));
+                naive_tensorcore_kernel_N_T<<<grid, block>>>((half*)a, (half*)b, (half*)out, M, N, K);
+                break;
+            }
+            default: {
+                std::cout << "Unsupported GEMM type!" << std::endl;
+                return -1;
+            }
+        }
+    }
+    CHECK_CUDA(cudaEventRecord(stop));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+    float time;
+    CHECK_CUDA(cudaEventElapsedTime(&time, start, stop));
+    float msecPerMatrixMul = time / iter;
+    double flopsPerMatrixMul = 2.0 * (double) M * (double) N * (double) K;
+    double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul / 1000.0f);
+    printf(
+            "[%s]: [M, N, K] = [%d, %d, %d] ==> Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops\n",
+            get_test_name(op).c_str(), M, N, K,
+            gigaFlops,
+            msecPerMatrixMul,
+            flopsPerMatrixMul);
+    CHECK_CUDA(cudaEventDestroy(start));
+    CHECK_CUDA(cudaEventDestroy(stop));
+
+    if (perf) { *perf = static_cast<float>(gigaFlops); }
     return 0;
 }
 
-// modified from: https://github.com/zchee/cuda-sample/blob/master/0_Simple/matrixMulCUBLAS/matrixMulCUBLAS.cpp
+// modified from: https://github.com/NVIDIA/cuda-samples/blob/master/Samples/4_CUDA_Libraries/simpleCUBLAS/simpleCUBLAS.cpp
 int cublas_gemm_float(void *v_handle, float *a, float *b, float *out, const int M, const int N, const int K,
                       const int iter,
                       GEMM_OP op, float *perf) {
