@@ -6,8 +6,13 @@
 #include "cuda.h"
 #include "device_launch_parameters.h"
 #include "gemm.hpp"
-#include "common.hpp"
 #include "cublas_v2.h"
+#include "cublas_api.h"
+#include "cuda_fp16.hpp"
+#include "../half/half/half.hpp"
+
+#define UP_DIV(x, y) (((x) + ((y) - 1)) / (y))
+#define UP_ROUND(x, y) ((((x) + ((y) - 1)) / (y)) * (y))
 
 #define CHECK_CUBLAS(expr) \
 { auto res = (expr);                         \
@@ -25,6 +30,24 @@
     std::cout << "cuda function: [ " << #expr << " ] error! return: " << static_cast<int>(res) << std::endl; \
     return -1; \
   } \
+}
+
+#define ENUM_CHIP_TYPE_CASE(x)   case x: return(#x);
+
+static std::string get_test_name(GEMM_OP op) {
+    switch (op) {
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::FLOAT_NAIVE_GEMM_N_T);
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::FLOAT_SRAM_GEMM_N_N);
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::FLOAT_CUBLAS_GEMM_N_N);
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::FLOAT_CUBLAS_GEMM_N_T);
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::FLOAT_CUBLAS_GEMM_T_N);
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::FLOAT_CUBLAS_GEMM_T_T);
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::HALF_CUBLAS_GEMM_N_N);
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::HALF_CUBLAS_GEMM_N_T);
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::HALF_CUBLAS_GEMM_T_N);
+        ENUM_CHIP_TYPE_CASE(GEMM_OP::HALF_CUBLAS_GEMM_T_T);
+    }
+    return "Unknown test name!";
 }
 
 // N_T means transpose_A = false, transpose_B = true
@@ -290,8 +313,9 @@ get_dynamic_sram_size(const void *kernel, const int block_M, const int block_N, 
     return sram_size;
 }
 
-template<typename T>
-int gemm_interface(T *a, T *b, T *out, const int M, const int N, const int K, const int iter, GEMM_OP op, float *perf) {
+
+int gemm_float(float *a, float *b, float *out, const int M, const int N, const int K, const int iter, GEMM_OP op,
+               float *perf) {
 
     // warming up
     switch (op) {
@@ -357,8 +381,8 @@ int gemm_interface(T *a, T *b, T *out, const int M, const int N, const int K, co
     double flopsPerMatrixMul = 2.0 * (double) M * (double) N * (double) K;
     double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul / 1000.0f);
     printf(
-            "op #%d: [M, N, K] = [%d, %d, %d] ==> Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops\n",
-            static_cast<int>(op), M, N, K,
+            "[%s]: [M, N, K] = [%d, %d, %d] ==> Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops\n",
+            get_test_name(op).c_str(), M, N, K,
             gigaFlops,
             msecPerMatrixMul,
             flopsPerMatrixMul);
@@ -369,13 +393,15 @@ int gemm_interface(T *a, T *b, T *out, const int M, const int N, const int K, co
     return 0;
 }
 
-template int
-gemm_interface<float>(float *, float *, float *, const int, const int, const int, const int, GEMM_OP, float *);
+int gemm_half(void *a, void *b, void *out, const int M, const int N, const int K, const int iter, GEMM_OP op,
+               float *perf){
+    return 0;
+}
 
 // modified from: https://github.com/zchee/cuda-sample/blob/master/0_Simple/matrixMulCUBLAS/matrixMulCUBLAS.cpp
-template<typename T>
-int cublas_gemm_interface(void *v_handle, T *a, T *b, T *out, const int M, const int N, const int K, const int iter,
-                          GEMM_OP op, float *perf) {
+int cublas_gemm_float(void *v_handle, float *a, float *b, float *out, const int M, const int N, const int K,
+                      const int iter,
+                      GEMM_OP op, float *perf) {
     // CUBLAS version 2.0
     const float alpha = 1.0f;
     const float beta = 0.0f;
@@ -383,8 +409,20 @@ int cublas_gemm_interface(void *v_handle, T *a, T *b, T *out, const int M, const
     cudaEvent_t start, stop;
     //Perform warmup operation with cublas
     switch (op) {
+        case GEMM_OP::FLOAT_CUBLAS_GEMM_N_N: {
+            CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+            break;
+        }
         case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
             CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+            break;
+        }
+        case GEMM_OP::FLOAT_CUBLAS_GEMM_T_N: {
+            CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+            break;
+        }
+        case GEMM_OP::FLOAT_CUBLAS_GEMM_T_T: {
+            CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, &alpha, b, K, a, K, &beta, out, N));
             break;
         }
         default: {
@@ -392,8 +430,6 @@ int cublas_gemm_interface(void *v_handle, T *a, T *b, T *out, const int M, const
             return -1;
         }
     }
-
-
     // Allocate CUDA events that we'll use for timing
     CHECK_CUDA(cudaEventCreate(&start));
     CHECK_CUDA(cudaEventCreate(&stop));
@@ -406,9 +442,20 @@ int cublas_gemm_interface(void *v_handle, T *a, T *b, T *out, const int M, const
         // need to transpose the order
         // so C^T = B^T @ A^T
         switch (op) {
+            case GEMM_OP::FLOAT_CUBLAS_GEMM_N_N: {
+                CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+                break;
+            }
             case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
-                CHECK_CUBLAS(
-                        cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+                CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+                break;
+            }
+            case GEMM_OP::FLOAT_CUBLAS_GEMM_T_N: {
+                CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+                break;
+            }
+            case GEMM_OP::FLOAT_CUBLAS_GEMM_T_T: {
+                CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, &alpha, b, K, a, K, &beta, out, N));
                 break;
             }
             default: {
@@ -416,6 +463,7 @@ int cublas_gemm_interface(void *v_handle, T *a, T *b, T *out, const int M, const
                 return -1;
             }
         }
+
     }
 
     // Record the stop event
@@ -432,8 +480,8 @@ int cublas_gemm_interface(void *v_handle, T *a, T *b, T *out, const int M, const
     double flopsPerMatrixMul = 2.0 * (double) M * (double) N * (double) K;
     double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul / 1000.0f);
     printf(
-            "[cublasSgemm]: [M, N, K] = [%d, %d, %d] ==> Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops\n",
-            M, N, K,
+            "[%s]: [M, N, K] = [%d, %d, %d] ==> Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops\n",
+            get_test_name(op).c_str(), M, N, K,
             gigaFlops,
             msecPerMatrixMul,
             flopsPerMatrixMul);
@@ -443,6 +491,82 @@ int cublas_gemm_interface(void *v_handle, T *a, T *b, T *out, const int M, const
     return 0;
 }
 
-template int
-cublas_gemm_interface<float>(void *, float *, float *, float *, const int, const int, const int, const int,
-                             GEMM_OP, float *);
+int cublas_gemm_half(void *v_handle, void *a, void *b, void *out, const int M, const int N, const int K,
+                     const int iter,
+                     GEMM_OP op, float *perf) {
+    // CUBLAS version 2.0
+    const __half alpha = 1.0f;
+    const __half beta = 0.0f;
+    cublasHandle_t handle = (cublasHandle_t) v_handle;
+    cudaEvent_t start, stop;
+
+    //Perform warmup operation with cublas
+    switch (op) {
+        case GEMM_OP::HALF_CUBLAS_GEMM_N_N: {
+            CHECK_CUBLAS(cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, (__half *) &alpha, (__half *) b, K,
+                                     (__half *) a, K, (__half *) &beta, (__half *) out, N));
+            break;
+        }
+        case GEMM_OP::HALF_CUBLAS_GEMM_N_T: {
+            CHECK_CUBLAS(cublasHgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, (__half *) &alpha, (__half *) b, K,
+                                     (__half *) a, K, (__half *) &beta, (__half *) out, N));
+            break;
+        }
+        case GEMM_OP::HALF_CUBLAS_GEMM_T_N: {
+            CHECK_CUBLAS(cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, M, N, K, (__half *) &alpha, (__half *) b, K,
+                                     (__half *) a, K, (__half *) &beta, (__half *) out, N));
+            break;
+        }
+        case GEMM_OP::HALF_CUBLAS_GEMM_T_T: {
+            CHECK_CUBLAS(cublasHgemm(handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, (__half *) &alpha, (__half *) b, K,
+                                     (__half *) a, K, (__half *) &beta, (__half *) out, N));
+            break;
+        }
+        default: {
+            std::cout << "Unsupported GEMM type!" << std::endl;
+            return -1;
+        }
+    }
+
+    // Allocate CUDA events that we'll use for timing
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+
+    // Record the start event
+    CHECK_CUDA(cudaEventRecord(start));
+
+    for (int j = 0; j < iter; j++) {
+        // note cublas is column primary!
+        // need to transpose the order
+        // so C^T = B^T @ A^T
+        CHECK_CUBLAS(
+                cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, (__half *) &alpha, (__half *) b, K, (__half *) a,
+                            K,
+                            (__half *) &beta, (__half *) out, N));
+
+    }
+
+    // Record the stop event
+    CHECK_CUDA(cudaEventRecord(stop));
+
+    // Wait for the stop event to complete
+    CHECK_CUDA(cudaEventSynchronize(stop));
+
+    float msecTotal = 0.0f;
+    CHECK_CUDA(cudaEventElapsedTime(&msecTotal, start, stop));
+
+    // Compute and print the performance
+    float msecPerMatrixMul = msecTotal / iter;
+    double flopsPerMatrixMul = 2.0 * (double) M * (double) N * (double) K;
+    double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecPerMatrixMul / 1000.0f);
+    printf(
+            "[%s]: [M, N, K] = [%d, %d, %d] ==> Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops\n",
+            get_test_name(op).c_str(), M, N, K,
+            gigaFlops,
+            msecPerMatrixMul,
+            flopsPerMatrixMul);
+
+    if (perf) { *perf = static_cast<float>(gigaFlops); }
+
+    return 0;
+}

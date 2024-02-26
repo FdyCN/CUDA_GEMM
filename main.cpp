@@ -8,7 +8,6 @@
 #include <fstream>
 #include <string>
 #include "gemm.hpp"
-#include "common.hpp"
 #include "test_utils.hpp"
 #include "cublas_v2.h"
 
@@ -97,7 +96,7 @@ test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op, float *perf
     CHECK_CUBLAS(cublasCreate(&handle));
     switch (op) {
         case GEMM_OP::FLOAT_NAIVE_GEMM_N_T: {
-            CHECK_RETURN(gemm_interface<float>(dev_a, dev_b, dev_c, M, N, K, iter, op, perf), "FLOAT_NAIVE_GEMM_N_T");
+            CHECK_RETURN(gemm_float(dev_a, dev_b, dev_c, M, N, K, iter, op, perf), "FLOAT_NAIVE_GEMM_N_T");
             if (!perf_only) {
                 cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
                 standard_gemm_host<float>(a, b, d, M, N, K, false, true);
@@ -106,7 +105,7 @@ test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op, float *perf
             break;
         }
         case GEMM_OP::FLOAT_SRAM_GEMM_N_N: {
-            CHECK_RETURN(gemm_interface<float>(dev_a, dev_b, dev_c, M, N, K, iter, op, perf), "FLOAT_SRAM_GEMM_N_N");
+            CHECK_RETURN(gemm_float(dev_a, dev_b, dev_c, M, N, K, iter, op, perf), "FLOAT_SRAM_GEMM_N_N");
             if (!perf_only) {
                 cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
                 standard_gemm_host<float>(a, b, d, M, N, K, false, false);
@@ -114,13 +113,144 @@ test_gemm_kernels(const int M, const int N, const int K, GEMM_OP op, float *perf
             }
             break;
         }
+        case GEMM_OP::FLOAT_CUBLAS_GEMM_N_N: {
+            CHECK_RETURN(cublas_gemm_float((void *) handle, dev_a, dev_b, dev_c, M, N, K, iter, op, perf),
+                         "FLOAT_CUBLAS_GEMM_N_N");
+            if (!perf_only) {
+                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                standard_gemm_host<float>(a, b, d, M, N, K, false, false);
+                CHECK_TEST(compare_results<float>(d, c, M * N), "FLOAT_CUBLAS_GEMM_N_N");
+            }
+            break;
+        }
         case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
-            CHECK_RETURN(cublas_gemm_interface<float>((void *) handle, dev_a, dev_b, dev_c, M, N, K, iter, op, perf),
-                         "FLOAT_CUBLAS_GEMM_N_T");
+            CHECK_RETURN(cublas_gemm_float((void *) handle, dev_a, dev_b, dev_c, M, N, K, iter, op, perf),
+                         "FLOAT_CUBLAS_GEMM_N_N");
             if (!perf_only) {
                 cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
                 standard_gemm_host<float>(a, b, d, M, N, K, false, true);
-                CHECK_TEST(compare_results<float>(d, c, M * N), "FLOAT_CUBLAS_GEMM_N_T");
+                CHECK_TEST(compare_results<float>(d, c, M * N), "FLOAT_CUBLAS_GEMM_N_N");
+            }
+            break;
+        }
+        case GEMM_OP::FLOAT_CUBLAS_GEMM_T_N: {
+            CHECK_RETURN(cublas_gemm_float((void *) handle, dev_a, dev_b, dev_c, M, N, K, iter, op, perf),
+                         "FLOAT_CUBLAS_GEMM_T_N");
+            if (!perf_only) {
+                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                standard_gemm_host<float>(a, b, d, M, N, K, true, false);
+                CHECK_TEST(compare_results<float>(d, c, M * N), "FLOAT_CUBLAS_GEMM_T_N");
+            }
+            break;
+        }
+        case GEMM_OP::FLOAT_CUBLAS_GEMM_T_T: {
+            CHECK_RETURN(cublas_gemm_float((void *) handle, dev_a, dev_b, dev_c, M, N, K, iter, op, perf),
+                         "FLOAT_CUBLAS_GEMM_N_N");
+            if (!perf_only) {
+                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                standard_gemm_host<float>(a, b, d, M, N, K, true, true);
+                CHECK_TEST(compare_results<float>(d, c, M * N), "FLOAT_CUBLAS_GEMM_N_N");
+            }
+            break;
+        }
+        default: {
+            std::cout << "unsupported test op type!" << std::endl;
+            break;
+        }
+    }
+    // Destroy the handle
+    CHECK_CUBLAS(cublasDestroy(handle));
+
+    cudaFree(dev_a);
+    cudaFree(dev_b);
+    cudaFree(dev_c);
+    free(a);
+    free(b);
+    free(c);
+    free(d);
+    return 0;
+}
+
+int
+test_gemm_kernels_half(const int M, const int N, const int K, GEMM_OP op, float *perf = nullptr,
+                       bool perf_only = false) {
+    half_float::half *a = (half_float::half *) malloc(M * K * sizeof(half_float::half));
+    generate_random_half(a, M * K);
+    half_float::half *b = (half_float::half *) malloc(N * K * sizeof(half_float::half));
+    generate_random_half(b, N * K);
+    half_float::half *c = (half_float::half *) malloc(M * N * sizeof(half_float::half));
+    memset(c, 0, M * N * sizeof(half_float::half));
+    half_float::half *d = (half_float::half *) malloc(M * N * sizeof(half_float::half));
+    memset(d, 0, M * N * sizeof(half_float::half));
+
+    void *dev_a;
+    cudaMalloc((void **) &dev_a, M * K * sizeof(half_float::half));
+    cudaMemcpy(dev_a, a, M * K * sizeof(half_float::half), cudaMemcpyKind::cudaMemcpyHostToDevice);
+    void *dev_b;
+    cudaMalloc((void **) &dev_b, N * K * sizeof(half_float::half));
+    cudaMemcpy(dev_b, b, N * K * sizeof(half_float::half), cudaMemcpyKind::cudaMemcpyHostToDevice);
+    void *dev_c;
+    cudaMalloc((void **) &dev_c, M * N * sizeof(half_float::half));
+
+    int iter = 10;
+    cublasHandle_t handle;
+    CHECK_CUBLAS(cublasCreate(&handle));
+    switch (op) {
+        case GEMM_OP::HALF_NAIVE_TENSORCORE_N_T: {
+            CHECK_RETURN(gemm_half((void *) dev_a, (void *) dev_b, (void *) dev_c, M, N, K, iter, op, perf),
+                         "HALF_NAIVE_TENSORCORE_N_T");
+            if (!perf_only) {
+                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                standard_gemm_host_half(a, b, d, M, N, K, false, true);
+                CHECK_TEST(compare_results_half(d, c, M * N), "HALF_NAIVE_TENSORCORE_N_T");
+            }
+            break;
+        }
+        case GEMM_OP::HALF_CUBLAS_GEMM_N_N: {
+            CHECK_RETURN(
+                    cublas_gemm_half((void *) handle, (void *) dev_a, (void *) dev_b, (void *) dev_c, M, N, K, iter, op,
+                                     perf),
+                    "HALF_CUBLAS_GEMM_N_N");
+            if (!perf_only) {
+                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                standard_gemm_host_half(a, b, d, M, N, K, false, false);
+                CHECK_TEST(compare_results_half(d, c, M * N), "HALF_CUBLAS_GEMM_N_N");
+            }
+            break;
+        }
+        case GEMM_OP::HALF_CUBLAS_GEMM_N_T: {
+            CHECK_RETURN(
+                    cublas_gemm_half((void *) handle, (void *) dev_a, (void *) dev_b, (void *) dev_c, M, N, K, iter, op,
+                                     perf),
+                    "HALF_CUBLAS_GEMM_N_T");
+            if (!perf_only) {
+                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                standard_gemm_host_half(a, b, d, M, N, K, false, true);
+                CHECK_TEST(compare_results_half(d, c, M * N), "HALF_CUBLAS_GEMM_N_T");
+            }
+            break;
+        }
+        case GEMM_OP::HALF_CUBLAS_GEMM_T_N: {
+            CHECK_RETURN(
+                    cublas_gemm_half((void *) handle, (void *) dev_a, (void *) dev_b, (void *) dev_c, M, N, K, iter, op,
+                                     perf),
+                    "HALF_CUBLAS_GEMM_T_N");
+            if (!perf_only) {
+                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                standard_gemm_host_half(a, b, d, M, N, K, true, false);
+                CHECK_TEST(compare_results_half(d, c, M * N), "HALF_CUBLAS_GEMM_T_N");
+            }
+            break;
+        }
+        case GEMM_OP::HALF_CUBLAS_GEMM_T_T: {
+            CHECK_RETURN(
+                    cublas_gemm_half((void *) handle, (void *) dev_a, (void *) dev_b, (void *) dev_c, M, N, K, iter, op,
+                                     perf),
+                    "HALF_CUBLAS_GEMM_T_T");
+            if (!perf_only) {
+                cudaMemcpy(c, dev_c, M * N * sizeof(float), cudaMemcpyKind::cudaMemcpyDeviceToHost);
+                standard_gemm_host_half(a, b, d, M, N, K, true, true);
+                CHECK_TEST(compare_results_half(d, c, M * N), "HALF_CUBLAS_GEMM_T_T");
             }
             break;
         }
@@ -154,14 +284,22 @@ int main(int argc, char **argv) {
         size_t N = atoi(argv[3]);
         bool performance_only = atoi(argv[4]) != 0 ? true : false;
         test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_SRAM_GEMM_N_N, nullptr, performance_only);
+        test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_N_N, nullptr, performance_only);
+        test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_T_N, nullptr, performance_only);
         test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_N_T, nullptr, performance_only);
+        test_gemm_kernels(M, N, K, GEMM_OP::FLOAT_CUBLAS_GEMM_T_T, nullptr, performance_only);
     }
 
     if (argc == 1) {
-        std::vector<int> MNK = {128, 256, 512, 1024, 2048, 4096, 8192};
+        std::vector<int> MNK(16, 256);
+        int index = 1;
+        for(auto& v: MNK){
+            v *= index;
+            index++;
+        }
         std::string fname = "gemm_batch_test.csv";
         std::ofstream out_file(fname, std::ios::out);
-        if(out_file.is_open()){
+        if (out_file.is_open()) {
             // titles
             out_file << "name" << ','
                      << "M" << ','
@@ -172,18 +310,26 @@ int main(int argc, char **argv) {
                 float perf = 0.0f; // returned in GFLOPS
                 test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_SRAM_GEMM_N_N, &perf, true);
                 out_file << "FLOAT_SRAM_GEMM_N_N" << ',' << v << ',' << v << ',' << v << ',' << perf << std::endl;
+                test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_CUBLAS_GEMM_N_N, &perf, true);
+                out_file << "FLOAT_CUBLAS_GEMM_N_N" << ',' << v << ',' << v << ',' << v << ',' << perf << std::endl;
                 test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_CUBLAS_GEMM_N_T, &perf, true);
                 out_file << "FLOAT_CUBLAS_GEMM_N_T" << ',' << v << ',' << v << ',' << v << ',' << perf << std::endl;
+                test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_CUBLAS_GEMM_T_N, &perf, true);
+                out_file << "FLOAT_CUBLAS_GEMM_T_N" << ',' << v << ',' << v << ',' << v << ',' << perf << std::endl;
+                test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_CUBLAS_GEMM_T_T, &perf, true);
+                out_file << "FLOAT_CUBLAS_GEMM_T_T" << ',' << v << ',' << v << ',' << v << ',' << perf << std::endl;
             }
             out_file.close();
-        }
-        else{
+        } else {
             std::cout << "Cannot save to file: " << fname << std::endl;
             std::cout << "ONLY print in terminal...." << std::endl;
             for (const auto &v: MNK) {
                 float perf = 0.0f; // returned in GFLOPS
                 test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_SRAM_GEMM_N_N, &perf, true);
+                test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_CUBLAS_GEMM_N_N, &perf, true);
+                test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_CUBLAS_GEMM_T_N, &perf, true);
                 test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_CUBLAS_GEMM_N_T, &perf, true);
+                test_gemm_kernels(v, v, v, GEMM_OP::FLOAT_CUBLAS_GEMM_T_T, &perf, true);
             }
         }
 

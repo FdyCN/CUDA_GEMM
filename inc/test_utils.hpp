@@ -8,6 +8,7 @@
 #include <random>
 #include <iostream>
 #include <unordered_map>
+#include "../half/half/half.hpp"
 
 #define CHECK_TEST(expr, op) \
 {                        \
@@ -33,6 +34,43 @@ do{                      \
 void generate_random_float(float *input, const int length) {
     for (int i = 0; i < length; i++) {
         input[i] = static_cast<float>(rand() % 5 + 1);
+    }
+}
+
+void generate_random_half(half_float::half *input, const int length) {
+    for (int i = 0; i < length; i++) {
+        input[i] = static_cast<half_float::half>(rand() % 5 + 1);
+    }
+}
+
+template<typename T>
+void standard_gemm_host(const T *a, const T *b, T *out, const int M, const int N, const int K, bool transA = false,
+                        bool transB = true) {
+    for (int m = 0; m < M; m++) {
+        for (int n = 0; n < N; n++) {
+            auto sum = 0;
+            for (int k = 0; k < K; k++) {
+                int a_index = transA ? k * M + m : m * K + k;
+                int b_index = transB ? n * K + k : k * N + n;
+                sum += a[a_index] * b[b_index];
+            }
+            out[m * N + n] = sum;
+        }
+    }
+}
+
+void standard_gemm_host_half(const half_float::half *a, const half_float::half *b, half_float::half *out, const int M, const int N, const int K, bool transA = false,
+                             bool transB = true) {
+    for (int m = 0; m < M; m++) {
+        for (int n = 0; n < N; n++) {
+            half_float::half sum = static_cast<half_float::half>(0.0f);
+            for (int k = 0; k < K; k++) {
+                int a_index = transA ? k * M + m : m * K + k;
+                int b_index = transB ? n * K + k : k * N + n;
+                sum += a[a_index] * b[b_index];
+            }
+            out[m * N + n] = sum;
+        }
     }
 }
 
@@ -68,9 +106,38 @@ int compare_results(const T *gt, const T *compute, const int length, float err_t
     return 0;
 }
 
+int compare_results_half(const half_float::half *gt, const half_float::half *compute, const int length,
+                    float err_thresh = 1e-3) {
+    if (!gt || !compute) {
+        std::cout << "gt or compute ptr is null" << std::endl;
+        return -1;
+    }
+    half_float::half max_val = static_cast<half_float::half>(std::numeric_limits<float>::min());
+    int err_num = 0;
+    for (int i = 0; i < length; i++) {
+        if (isnan(static_cast<float>(compute[i]))) {
+            std::cout << "compute[" << i << "] is Nan! " << std::endl;
+            return -1;
+        }
+        auto err = fabs(static_cast<float>(compute[i]) - static_cast<float>(gt[i]));
+        if (err > err_thresh) {
+            err_num++;
+            max_val = err > max_val ? err : max_val;
+        }
+
+    }
+
+    if (err_num > 0) {
+        std::cout << "data compare failed! max err: " << max_val << ", err_num: " << err_num << std::endl;
+        return -1;
+    }
+    return 0;
+}
+
+
 int query_cudacore_per_sm(int major, int minor) {
     static std::unordered_map<int, int> query_map = {
-            {60,  64},
+            {60, 64},
             {61, 128},
             {62, 128},
             {70, 64},
@@ -81,8 +148,8 @@ int query_cudacore_per_sm(int major, int minor) {
     };
 
     int sm = major * 10 + minor;
-    auto res= query_map.find(sm);
-    if(res == query_map.end()){
+    auto res = query_map.find(sm);
+    if (res == query_map.end()) {
         std::cout << "Unsupported sm arch in the query map!" << std::endl;
         return 0;
     }
