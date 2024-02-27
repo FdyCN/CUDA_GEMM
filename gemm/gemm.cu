@@ -344,7 +344,6 @@ int gemm_float(float *a, float *b, float *out, const int M, const int N, const i
             const int BLOCK_SIZE_N = 128;
             const int THREAD_SIZE_X = 8;
             const int THREAD_SIZE_Y = 8;
-            dim3 block(16, 16);
             dim3 dimBlock(BLOCK_SIZE_N / THREAD_SIZE_X, BLOCK_SIZE_M / THREAD_SIZE_Y);
             dim3 dimGrid(N / BLOCK_SIZE_N, M / BLOCK_SIZE_M);
             blocked_sram_sgemm_kernel_N_N<BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, THREAD_SIZE_Y, THREAD_SIZE_X>
@@ -413,7 +412,7 @@ int gemm_half(void *a, void *b, void *out, const int M, const int N, const int K
         case GEMM_OP::HALF_NAIVE_TENSORCORE_N_T: {
             dim3 block(64, 4);
             dim3 grid(UP_DIV(N, TILE_N * 2), UP_DIV(M, TILE_M * block.y));
-            naive_tensorcore_kernel_N_T<<<grid, block>>>((half*)a, (half*)b, (half*)out, M, N, K);
+            naive_tensorcore_kernel_N_T<<<grid, block>>>((half *) a, (half *) b, (half *) out, M, N, K);
             break;
         }
         default: {
@@ -430,7 +429,7 @@ int gemm_half(void *a, void *b, void *out, const int M, const int N, const int K
             case GEMM_OP::HALF_NAIVE_TENSORCORE_N_T: {
                 dim3 block(64, 4);
                 dim3 grid(UP_DIV(N, TILE_N * 2), UP_DIV(M, TILE_M * block.y));
-                naive_tensorcore_kernel_N_T<<<grid, block>>>((half*)a, (half*)b, (half*)out, M, N, K);
+                naive_tensorcore_kernel_N_T<<<grid, block>>>((half *) a, (half *) b, (half *) out, M, N, K);
                 break;
             }
             default: {
@@ -460,30 +459,34 @@ int gemm_half(void *a, void *b, void *out, const int M, const int N, const int K
 }
 
 // modified from: https://github.com/NVIDIA/cuda-samples/blob/master/Samples/4_CUDA_Libraries/simpleCUBLAS/simpleCUBLAS.cpp
-int cublas_gemm_float(void *v_handle, float *a, float *b, float *out, const int M, const int N, const int K,
+int cublas_gemm_float(void **v_handle, float *a, float *b, float *out, const int M, const int N, const int K,
                       const int iter,
                       GEMM_OP op, float *perf) {
     // CUBLAS version 2.0
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    cublasHandle_t handle = (cublasHandle_t) v_handle;
+    cublasHandle_t *handle = (cublasHandle_t *) v_handle;
     cudaEvent_t start, stop;
     //Perform warmup operation with cublas
     switch (op) {
         case GEMM_OP::FLOAT_CUBLAS_GEMM_N_N: {
-            CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+            CHECK_CUBLAS(
+                    cublasSgemm(*handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, b, N, a, K, &beta, out, N));
             break;
         }
         case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
-            CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+            CHECK_CUBLAS(
+                    cublasSgemm(*handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha, b, K, a, K, &beta, out, N));
             break;
         }
         case GEMM_OP::FLOAT_CUBLAS_GEMM_T_N: {
-            CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+            CHECK_CUBLAS(
+                    cublasSgemm(*handle, CUBLAS_OP_N, CUBLAS_OP_T, N, M, K, &alpha, b, N, a, M, &beta, out, N));
             break;
         }
         case GEMM_OP::FLOAT_CUBLAS_GEMM_T_T: {
-            CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+            CHECK_CUBLAS(
+                    cublasSgemm(*handle, CUBLAS_OP_T, CUBLAS_OP_T, N, M, K, &alpha, b, K, a, M, &beta, out, N));
             break;
         }
         default: {
@@ -504,19 +507,23 @@ int cublas_gemm_float(void *v_handle, float *a, float *b, float *out, const int 
         // so C^T = B^T @ A^T
         switch (op) {
             case GEMM_OP::FLOAT_CUBLAS_GEMM_N_N: {
-                CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+                CHECK_CUBLAS(
+                        cublasSgemm(*handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, b, N, a, K, &beta, out, N));
                 break;
             }
             case GEMM_OP::FLOAT_CUBLAS_GEMM_N_T: {
-                CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+                CHECK_CUBLAS(
+                        cublasSgemm(*handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha, b, K, a, K, &beta, out, N));
                 break;
             }
             case GEMM_OP::FLOAT_CUBLAS_GEMM_T_N: {
-                CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+                CHECK_CUBLAS(
+                        cublasSgemm(*handle, CUBLAS_OP_N, CUBLAS_OP_T, N, M, K, &alpha, b, N, a, M, &beta, out, N));
                 break;
             }
             case GEMM_OP::FLOAT_CUBLAS_GEMM_T_T: {
-                CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, &alpha, b, K, a, K, &beta, out, N));
+                CHECK_CUBLAS(
+                        cublasSgemm(*handle, CUBLAS_OP_T, CUBLAS_OP_T, N, M, K, &alpha, b, K, a, M, &beta, out, N));
                 break;
             }
             default: {
@@ -524,7 +531,6 @@ int cublas_gemm_float(void *v_handle, float *a, float *b, float *out, const int 
                 return -1;
             }
         }
-
     }
 
     // Record the stop event
@@ -552,35 +558,35 @@ int cublas_gemm_float(void *v_handle, float *a, float *b, float *out, const int 
     return 0;
 }
 
-int cublas_gemm_half(void *v_handle, void *a, void *b, void *out, const int M, const int N, const int K,
+int cublas_gemm_half(void **v_handle, void *a, void *b, void *out, const int M, const int N, const int K,
                      const int iter,
                      GEMM_OP op, float *perf) {
     // CUBLAS version 2.0
     const __half alpha = 1.0f;
     const __half beta = 0.0f;
-    cublasHandle_t handle = (cublasHandle_t) v_handle;
+    cublasHandle_t *handle = (cublasHandle_t *) v_handle;
     cudaEvent_t start, stop;
 
     //Perform warmup operation with cublas
     switch (op) {
         case GEMM_OP::HALF_CUBLAS_GEMM_N_N: {
-            CHECK_CUBLAS(cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, (__half *) &alpha, (__half *) b, K,
+            CHECK_CUBLAS(cublasHgemm(*handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, (__half *) &alpha, (__half *) b, N,
                                      (__half *) a, K, (__half *) &beta, (__half *) out, N));
             break;
         }
         case GEMM_OP::HALF_CUBLAS_GEMM_N_T: {
-            CHECK_CUBLAS(cublasHgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, (__half *) &alpha, (__half *) b, K,
+            CHECK_CUBLAS(cublasHgemm(*handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, (__half *) &alpha, (__half *) b, K,
                                      (__half *) a, K, (__half *) &beta, (__half *) out, N));
             break;
         }
         case GEMM_OP::HALF_CUBLAS_GEMM_T_N: {
-            CHECK_CUBLAS(cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, M, N, K, (__half *) &alpha, (__half *) b, K,
-                                     (__half *) a, K, (__half *) &beta, (__half *) out, N));
+            CHECK_CUBLAS(cublasHgemm(*handle, CUBLAS_OP_N, CUBLAS_OP_T, N, M, K, (__half *) &alpha, (__half *) b, N,
+                                     (__half *) a, M, (__half *) &beta, (__half *) out, N));
             break;
         }
         case GEMM_OP::HALF_CUBLAS_GEMM_T_T: {
-            CHECK_CUBLAS(cublasHgemm(handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, (__half *) &alpha, (__half *) b, K,
-                                     (__half *) a, K, (__half *) &beta, (__half *) out, N));
+            CHECK_CUBLAS(cublasHgemm(*handle, CUBLAS_OP_T, CUBLAS_OP_T, N, M, K, (__half *) &alpha, (__half *) b, K,
+                                     (__half *) a, M, (__half *) &beta, (__half *) out, N));
             break;
         }
         default: {
@@ -600,11 +606,32 @@ int cublas_gemm_half(void *v_handle, void *a, void *b, void *out, const int M, c
         // note cublas is column primary!
         // need to transpose the order
         // so C^T = B^T @ A^T
-        CHECK_CUBLAS(
-                cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, (__half *) &alpha, (__half *) b, K, (__half *) a,
-                            K,
-                            (__half *) &beta, (__half *) out, N));
-
+        switch (op) {
+            case GEMM_OP::HALF_CUBLAS_GEMM_N_N: {
+                CHECK_CUBLAS(cublasHgemm(*handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, (__half *) &alpha, (__half *) b, N,
+                                         (__half *) a, K, (__half *) &beta, (__half *) out, N));
+                break;
+            }
+            case GEMM_OP::HALF_CUBLAS_GEMM_N_T: {
+                CHECK_CUBLAS(cublasHgemm(*handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, (__half *) &alpha, (__half *) b, K,
+                                         (__half *) a, K, (__half *) &beta, (__half *) out, N));
+                break;
+            }
+            case GEMM_OP::HALF_CUBLAS_GEMM_T_N: {
+                CHECK_CUBLAS(cublasHgemm(*handle, CUBLAS_OP_N, CUBLAS_OP_T, N, M, K, (__half *) &alpha, (__half *) b, N,
+                                         (__half *) a, M, (__half *) &beta, (__half *) out, N));
+                break;
+            }
+            case GEMM_OP::HALF_CUBLAS_GEMM_T_T: {
+                CHECK_CUBLAS(cublasHgemm(*handle, CUBLAS_OP_T, CUBLAS_OP_T, N, M, K, (__half *) &alpha, (__half *) b, K,
+                                         (__half *) a, M, (__half *) &beta, (__half *) out, N));
+                break;
+            }
+            default: {
+                std::cout << "Unsupported GEMM type!" << std::endl;
+                return -1;
+            }
+        }
     }
 
     // Record the stop event

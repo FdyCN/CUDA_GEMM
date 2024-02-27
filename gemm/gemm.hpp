@@ -31,7 +31,7 @@ int gemm_float(float* a, float* b, float* out, const int M, const int N, const i
 
 int gemm_half(void* a, void* b, void* out, const int M, const int N, const int K, const int iter, GEMM_OP op, float* perf = nullptr);
 
-int cublas_gemm_float(void* v_handle, float* a, float* b, float* out, const int M, const int N, const int K, const int iter, GEMM_OP op, float* perf = nullptr);
+int cublas_gemm_float(void** v_handle, float* a, float* b, float* out, const int M, const int N, const int K, const int iter, GEMM_OP op, float* perf = nullptr);
 
-int cublas_gemm_half(void* v_handle, void* a,  void* b,  void* out, const int M, const int N, const int K, const int iter, GEMM_OP op, float* perf = nullptr);
+int cublas_gemm_half(void** v_handle, void* a,  void* b,  void* out, const int M, const int N, const int K, const int iter, GEMM_OP op, float* perf = nullptr);
 #endif //CUDA_GEMM_GEMM_HPP

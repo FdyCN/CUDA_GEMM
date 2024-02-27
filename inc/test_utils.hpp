@@ -43,12 +43,12 @@ void generate_random_half(half_float::half *input, const int length) {
     }
 }
 
-template<typename T>
-void standard_gemm_host(const T *a, const T *b, T *out, const int M, const int N, const int K, bool transA = false,
+
+void standard_gemm_host_float(const float *a, const float *b, float *out, const int M, const int N, const int K, bool transA = false,
                         bool transB = true) {
     for (int m = 0; m < M; m++) {
         for (int n = 0; n < N; n++) {
-            auto sum = 0;
+            float sum = 0.0f;
             for (int k = 0; k < K; k++) {
                 int a_index = transA ? k * M + m : m * K + k;
                 int b_index = transB ? n * K + k : k * N + n;
